@@ -885,15 +885,29 @@ func (sb *statisticsBuilder) copyColStat(
 // Then, ensureColStat sets the distinct count to the minimum of the existing
 // value and the new value.
 func (sb *statisticsBuilder) ensureColStat(
-	col opt.ColumnID, distinctCount float64, inputStatsBuilder *statisticsBuilder,
+	colSet opt.ColSet, distinctCount float64, inputStatsBuilder *statisticsBuilder,
 ) *props.ColumnStatistic {
-	colStat, ok := sb.s.ColStats[col]
-	if !ok {
-		colStat = sb.copyColStat(inputStatsBuilder, util.MakeFastIntSet(int(col)))
-	}
+	if colSet.Len() == 1 {
+		col, _ := colSet.Next(0)
+		colStat, ok := sb.s.ColStats[opt.ColumnID(col)]
+		if !ok {
+			colStat = sb.copyColStat(inputStatsBuilder, util.MakeFastIntSet(int(col)))
+		}
 
-	colStat.DistinctCount = min(colStat.DistinctCount, distinctCount)
-	return colStat
+		colStat.DistinctCount = min(colStat.DistinctCount, distinctCount)
+		return colStat
+	} else {
+		sb.keyBuf.Reset()
+		sb.keyBuf.writeColSet(colSet)
+
+		colStat, ok := sb.s.MultiColStats[sb.keyBuf.String()]
+
+		if !ok {
+			colStat = sb.copyColStat(inputStatsBuilder, colSet)
+		}
+		colStat.DistinctCount = min(colStat.DistinctCount, distinctCount)
+		return colStat
+	}
 }
 
 // makeColStat creates a column statistic for the given set of columns, and
@@ -1086,18 +1100,60 @@ func (sb *statisticsBuilder) applyConstraint(
 	return sb.selectivityFromDistinctCounts(inputStatsBuilder)
 }
 
-func (sb *statisticsBuilder) enforceFDOnDistinctCounts(inputStatsBuilder *statisticsBuilder) {
+func (sb *statisticsBuilder) mutateDistinctCountEnforceFD(depStat *props.ColumnStatistic, inputStatsBuilder *statisticsBuilder) {
 	fd := inputStatsBuilder.props.FuncDeps
-	for dep, depStat := range sb.s.ColStats {
-		for det, detStat := range sb.s.ColStats {
+	for _, detStat := range sb.s.ColStats {
+		if depStat.DistinctCount > detStat.DistinctCount {
+			if fd.InClosureOf(depStat.Cols, detStat.Cols, false) {
+				sb.ensureColStat(depStat.Cols, detStat.DistinctCount, inputStatsBuilder)
+			}
+		}
+	}
+
+}
+func (sb *statisticsBuilder) enforceFDOnDistinctCounts(inputStatsBuilder *statisticsBuilder) {
+	for _, depStat := range sb.s.ColStats {
+		sb.mutateDistinctCountEnforceFD(depStat, inputStatsBuilder)
+	}
+}
+
+func (sb *statisticsBuilder) enforceMCSCFDOnDistinctCounts(inputStatsBuilder *statisticsBuilder) {
+	fd := inputStatsBuilder.props.FuncDeps
+	var s []*props.ColumnStatistic
+	for _, depStat := range sb.s.MultiColStats {
+		s = append(s, depStat)
+	}
+	for _, depStat := range sb.s.ColStats {
+		s = append(s, depStat)
+	}
+
+	for _, dep := range s {
+		for _, det := range s {
+			if dep.DistinctCount > det.DistinctCount {
+				if fd.InClosureOf(dep.Cols, det.Cols, false) {
+					sb.ensureColStat(dep.Cols, det.DistinctCount, inputStatsBuilder)
+				}
+			}
+		}
+	}
+}
+
+/*
+func (sb *statisticsBuilder) enforceMCFDOnDistinctCounts(inputStatsBuilder *statisticsBuilder) {
+	fd := inputStatsBuilder.props.FuncDeps
+	for dep, depStat := range sb.s.MultiColStats {
+		for det, detStat := range sb.s.MultiColStats {
 			if depStat.DistinctCount > detStat.DistinctCount {
-				if fd.InClosureOf(util.MakeFastIntSet(int(dep)), util.MakeFastIntSet(int(det)), false) {
+				sb.keyBuf.Reset()
+				sb.keyBuf.
+				if fd.InClosureOf(dep, util.MakeFastIntSet(int(det)), false) {
 					sb.ensureColStat(dep, detStat.DistinctCount, inputStatsBuilder)
 				}
 			}
 		}
 	}
 }
+*/
 
 func (sb *statisticsBuilder) applyConstraintSet(
 	cs *constraint.Set, inputStatsBuilder *statisticsBuilder,
@@ -1229,7 +1285,7 @@ func (sb *statisticsBuilder) updateDistinctCountsFromConstraint(
 			val = endVal
 		}
 
-		sb.ensureColStat(c.Columns.Get(col).ID(), distinctCount, inputStatsBuilder)
+		sb.ensureColStat(util.MakeFastIntSet(int(c.Columns.Get(col).ID())), distinctCount, inputStatsBuilder)
 		applied = true
 	}
 
