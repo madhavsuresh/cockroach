@@ -62,6 +62,14 @@ type Statistics struct {
 	selectivity float64
 }
 
+func (s *Statistics) Copy() Statistics {
+	c := Statistics{}
+	c.rowCount = s.rowCount
+	c.ColStats = s.ColStats.Copy()
+	c.selectivity = s.selectivity
+	return c
+}
+
 func (s *Statistics) RowCount() float64 {
 	return s.rowCount
 }
@@ -144,6 +152,13 @@ type ColumnStatistic struct {
 	// DistinctCount is the estimated number of distinct values of this
 	// set of columns for this expression.
 	distinctCount float64
+}
+
+func (c *ColumnStatistic) Copy() ColumnStatistic {
+	cp := ColumnStatistic{}
+	cp.Cols = c.Cols.Copy()
+	cp.distinctCount = c.distinctCount
+	return cp
 }
 
 func (c *ColumnStatistic) UpdateDistinctCount(distinctCount float64) {
